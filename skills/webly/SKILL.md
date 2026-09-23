@@ -32,7 +32,7 @@ framework (React) site, a CMS, forms or domains, and before telling the person
 something is not supported. If this file and the live API disagree, trust the API.
 
 The helper that does every deterministic step is `scripts/webly.mjs` in this
-skill's folder (zero dependencies, Node 18+). Below, `webly` means
+skill's folder (zero dependencies, Node 20+). Below, `webly` means
 `node <this skill's folder>/scripts/webly.mjs`.
 
 ## Language
@@ -60,6 +60,9 @@ on disk and at the API. Rebuild it before doing anything:
    `claim_anonymous_site` under a `webly` server (in Claude Code they are named
    `mcp__webly__…` or, from the plugin, `mcp__plugin_webly_webly__…`). A server
    that is configured but not in your tool list is **not loaded**.
+   Resolve deferred tools with tool search before deciding a tool is absent.
+   Loaded tools do not necessarily mean OAuth: API-key connections can manage
+   sites but do not expose `claim_anonymous_site`.
 3. Pick the row and follow it:
 
 | # | Token saved | Webly MCP tools loaded | Who this is | Do this |
@@ -67,15 +70,15 @@ on disk and at the API. Rebuild it before doing anything:
 | 1 | no | no | New to Webly | **Publish without an account** (below). Don't set up MCP until they want to keep the site. |
 | 2 | yes | no | Published before; MCP was never set up or didn't load | Read `site.next`. While it lists `update`, keep publishing with `webly deploy`. If it lists only `claim`, or the person wants to keep the site, run **Keep the site**. |
 | 3 | no | yes | Signed in | Use **Working over MCP**. Anything they deployed anonymously was already claimed. |
-| 4 | yes | yes | Signed in with a site still unclaimed | Claim first: `claim_anonymous_site` with the token (read it from the file in `credentialFile`, never print it), then `webly forget`. Continue with **Working over MCP**. |
+| 4 | yes | yes | Connected with a site still unclaimed | If `claim_anonymous_site` is available, call it with the token (read it from `credentialFile`, never print it), then `webly forget` after success. Otherwise use **Keep the site**, step 3. Continue with **Working over MCP** after claiming. |
 
 If the person asks to connect, sign in, or use their Webly account, they already
 have one: whatever the row, go to **Keep the site** and run steps 1, 2 and 4
 (skip 3 and 5 when no token is saved). Don't publish anonymously for them.
 
-If `pending` is `claim` and the tools are loaded, finish the claim now (row 4),
+If `pending` is `claim` and the claim tool is available, finish the claim now (row 4),
 without asking again: the person already asked for it before the restart. If
-`pending` is `claim` and the tools are still not loaded, go to **Keep the
+`pending` is `claim` and the claim tool is unavailable, go to **Keep the
 site**, step 3.
 
 ## Publish without an account
@@ -148,12 +151,19 @@ own workspace.
      process exits first their approval is lost). Then they run
      `codex resume --last`.
    - Desktop apps: restart the app, then say "continue with Webly".
-3. **If the tools are not loaded in this session** (desktop app, `-p`, the
-   person can't restart now): claim in the browser instead so nothing is lost:
+3. **If the claim tool is unavailable in this session** (desktop app, `-p`,
+   the person can't restart now, or MCP uses an API key): claim in the browser
+   instead so nothing is lost. API keys cannot claim; do not retry a missing
+   tool or replace their working MCP configuration:
    `webly claim-link --open`. It opens `app.webly.ai/claim` with the token in
-   the URL fragment (never sent to a server, never printed). They sign in and
-   the site is theirs; then run `webly forget`. MCP is ready the next time a
-   session starts.
+   the URL fragment (never sent to a server, never printed). Ask them to sign
+   in and click **Claim website**. Opening the page or signing in alone does
+   not claim the site. After they finish, run `webly doctor`: only
+   `siteError.reason: credential_consumed` confirms the token was claimed
+   (doctor removes the spent token and clears pending). If it is still
+   unclaimed, the browser was closed, or status is unavailable, keep the token
+   and pending step so they can retry. Never run `forget` merely because the
+   browser opened. MCP is ready the next time a session starts.
 4. **When the tools are loaded:**
    - Claude Code: call the server's `authenticate` tool
      (`mcp__plugin_webly_webly__authenticate` or `mcp__webly__authenticate`;

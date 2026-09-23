@@ -5,11 +5,11 @@
 set -euo pipefail
 
 REPO_BASE="https://raw.githubusercontent.com/KevyVo/webly-plugin/main/skills/webly"
-TARGETS=("${HOME}/.claude/skills/webly" "${HOME}/.agents/skills/webly")
+TARGETS=("${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/skills/webly" "${HOME}/.agents/skills/webly")
 
 die() { echo "error: $1" >&2; exit 1; }
 command -v curl >/dev/null 2>&1 || die "requires curl"
-command -v node >/dev/null 2>&1 || echo "warning: node (18+) is required to run the skill's helper; install it before publishing" >&2
+command -v node >/dev/null 2>&1 || echo "warning: node (20+) is required to run the skill's helper; install it before publishing" >&2
 
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT

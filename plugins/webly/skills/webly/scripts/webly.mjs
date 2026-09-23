@@ -10,10 +10,12 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Skill release. scripts/sync-plugin.sh stamps this into the plugin manifests; bump it to ship. */
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 // The published plugin manifest is what `npx skills`, install.sh and /plugin install all read from.
 const LATEST_URL = process.env.WEBLY_VERSION_URL ?? 'https://raw.githubusercontent.com/KevyVo/webly-plugin/main/plugins/webly/.claude-plugin/plugin.json';
-const CREDENTIAL_FILE =process.env.WEBLY_CREDENTIAL_FILE || join(homedir(), '.webly', 'anonymous-credential');
+const CREDENTIAL_FILE = process.env.WEBLY_STATE_FILE || join(homedir(), '.webly', 'state.json');
+// Where releases before 0.4.0 saved the token; moved to CREDENTIAL_FILE on first read.
+const LEGACY_FILE = process.env.WEBLY_STATE_FILE ? null : join(homedir(), '.webly', 'anonymous-credential');
 const PENDING_FILE = join(dirname(CREDENTIAL_FILE), 'pending');
 const PLUGIN_MARKETPLACE = 'KevyVo/webly-plugin';
 // The only server answers that mean the saved secret can never be used again.
@@ -30,10 +32,10 @@ const USAGE = `Usage: webly.mjs <command>
   claim-link [--open]         Open (or print) the page that claims the site into an account
   connect claude|codex        Register the Webly MCP server for this agent host, at user scope
   pending set <intent> | clear   Remember a step to finish after a restart (e.g. claim)
-  forget                      Delete the saved token (after the site was claimed over MCP)
+  forget                      Delete the saved token only after the API confirms it is spent
   init                        Create the token without deploying
 
-Env: WEBLY_API_URL (default https://api.webly.ai), WEBLY_CREDENTIAL_FILE (default ~/.webly/anonymous-credential)`;
+Env: WEBLY_API_URL (default https://api.webly.ai), WEBLY_STATE_FILE (default ~/.webly/state.json)`;
 
 /** Delete the saved secret only if it still holds this token, so a newer one saved by a parallel run survives. */
 export async function forgetCredential(token, file = CREDENTIAL_FILE) {
@@ -45,9 +47,18 @@ export async function forgetCredential(token, file = CREDENTIAL_FILE) {
 }
 
 /** The saved token, or null when there is none. Throws if the file is unsafe or for another API. */
-export async function savedCredential(api, file = CREDENTIAL_FILE) {
+export async function savedCredential(api, file = CREDENTIAL_FILE, legacy = file === CREDENTIAL_FILE ? LEGACY_FILE : null) {
   let info;
-  try { info = await lstat(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { info = await lstat(file); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    if (!legacy) return null;
+    // No-replace move, so a racing run or a newer state.json is never overwritten.
+    let linked = true;
+    try { await link(legacy, file); } catch (e) { if (e.code === 'ENOENT') return null; if (e.code !== 'EEXIST') throw e; linked = false; }
+    // A legacy copy left behind would bring the token back after `forget`, so undo our link and fail instead.
+    try { await unlink(legacy); } catch (e) { if (e.code !== 'ENOENT') { if (linked) await unlink(file).catch(() => {}); throw e; } }
+    return savedCredential(api, file, null);
+  }
   if (!info.isFile() || (process.platform !== 'win32' && (info.mode & 0o077))) throw new Error('Credential must be a regular file with mode 0600');
   const saved = JSON.parse(await readFile(file, 'utf8'));
   if (saved.api !== api) throw new Error('Saved credential belongs to another API origin');
@@ -149,9 +160,9 @@ export async function skillUpdate() {
   } catch { return null; }
 }
 
-async function api(base, path, token, init = {}) {
+async function api(base, path, token, { timeout = 30_000, ...init } = {}) {
   const response = await fetch(`${base}/public/v1/anonymous${path}`, {
-    ...init, redirect: 'error', signal: AbortSignal.timeout(30_000), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    ...init, redirect: 'error', signal: AbortSignal.timeout(timeout), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
   });
   return { ok: response.ok, status: response.status, body: await response.json().catch(() => ({})) };
 }
@@ -167,12 +178,18 @@ async function settle(base, token, result) {
   return result;
 }
 
-function openInBrowser(url) {
+async function openInBrowser(url) {
   const [cmd, ...args] = process.env.WEBLY_OPEN_CMD ? [process.env.WEBLY_OPEN_CMD]
     : process.platform === 'darwin' ? ['open'] : process.platform === 'win32' ? ['cmd', '/c', 'start', '""'] : ['xdg-open'];
-  const child = spawn(cmd, [...args, url], { stdio: 'ignore', detached: true });
-  child.on('error', () => {});
-  child.unref();
+  await new Promise((resolve, reject) => {
+    const child = spawn(cmd, [...args, url], { stdio: 'ignore' });
+    // Child-process errors and output can contain the secret URL. Only report
+    // a fixed diagnostic, and keep the saved credential available for retry.
+    const failed = () => reject(new Error('Could not open the claim page. Check your browser opener and retry; the saved token was kept.'));
+    const timer = setTimeout(() => { child.kill(); failed(); }, 15_000);
+    child.once('error', () => { clearTimeout(timer); failed(); });
+    child.once('exit', code => { clearTimeout(timer); code === 0 ? resolve() : failed(); });
+  });
 }
 
 function run(cmd, args) {
@@ -195,12 +212,15 @@ async function main() {
   }
 
   if (command === 'doctor') {
-    const report = { version: VERSION, update: await skillUpdate(), api: base, credentialFile: CREDENTIAL_FILE, credential: 'none', site: null, siteError: null, mcp: await mcpSetup(), pending: await readPending() };
+    // The session-start hook allows 10 s; the update check runs alongside the status call.
+    const brief = argument === '--brief';
+    const updateCheck = skillUpdate();
+    const report = { version: VERSION, update: null, api: base, credentialFile: CREDENTIAL_FILE, credential: 'none', site: null, siteError: null, mcp: await mcpSetup(), pending: await readPending() };
     let token = null;
     try { token = await savedCredential(base); } catch (error) { report.credential = `unusable: ${error.message}`; }
     if (token) {
       report.credential = 'present';
-      const current = await api(base, '/sites/current', token).catch(error => ({ ok: false, status: 0, body: { message: `Webly unreachable: ${error.message}` } }));
+      const current = await api(base, '/sites/current', token, { timeout: brief ? 4000 : 30_000 }).catch(error => ({ ok: false, status: 0, body: { message: `Webly unreachable: ${error.message}` } }));
       if (current.ok) report.site = current.body;
       else {
         report.siteError = { status: current.status, reason: current.body.details?.reason ?? null, message: current.body.message ?? null };
@@ -209,7 +229,8 @@ async function main() {
     }
     // A claim can't be pending without a token to claim with.
     if (report.pending === 'claim' && !report.credential.startsWith('present')) { await unlink(PENDING_FILE).catch(() => {}); report.pending = null; }
-    if (argument !== '--brief') return print(report);
+    report.update = await updateCheck;
+    if (!brief) return print(report);
     const parts = [];
     if (report.site) {
       const s = report.site;
@@ -268,8 +289,14 @@ async function main() {
   }
 
   if (command === 'forget') {
-    const token = await savedCredential(base).catch(() => null);
-    if (token) await forgetCredential(token);
+    const token = await savedCredential(base);
+    if (token) {
+      const current = await api(base, '/sites/current', token);
+      if (current.ok || !SPENT.has(current.body.details?.reason)) {
+        throw new Error('Claim completion is not confirmed. The saved token and pending step were kept; finish claiming in the browser or over MCP, then retry.');
+      }
+      await forgetCredential(token);
+    }
     await unlink(PENDING_FILE).catch(() => {});
     return print(token ? 'Saved token removed' : 'No saved token');
   }
@@ -290,7 +317,7 @@ async function main() {
     if (!current.ok) await failed(current.body, 'Could not find a claimable site');
     // The token rides in the fragment, which browsers never send to a server. Printing it is an explicit choice.
     const link = `${current.body.claimPage}#token=${encodeURIComponent(token)}`;
-    if (argument === '--open') { openInBrowser(link); return print(`Opened the claim page in the browser for "${current.body.name}".`); }
+    if (argument === '--open') { await openInBrowser(link); return print(`Opened the claim page in the browser for "${current.body.name}". Finish sign-in and click Claim website; opening this page does not complete the claim.`); }
     return print(link);
   }
 
