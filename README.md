@@ -1,18 +1,53 @@
-# Webly plugin for Claude Code
+# Webly skill and plugin
 
-Build, preview and publish websites on [Webly](https://webly.ai) from Claude Code.
-Ships the hosted Webly MCP server plus a skill that teaches Claude the safe
-workflow: write source → run the quality gate → show you a private draft →
-publish only after you say yes.
+[Webly](https://webly.ai) is website hosting for agents. This repo ships the
+`webly` skill: your agent publishes a site in seconds with no account, and when
+you want to keep it, you sign in once and the site becomes yours, editable over
+Webly's MCP server.
 
 ## Install
 
-```shell
-/plugin marketplace add KevyVo/webly-plugin
-/plugin install webly@webly
+Paste this into Claude Code, Codex, Cursor or any agent that can run commands:
+
+```
+Set up Webly, website hosting for agents.
+If I have npm: npx skills add KevyVo/webly-plugin --skill webly -g
+If not: curl -fsSL https://webly.ai/install.sh | bash
+Then read https://api.webly.ai/docs and ask me what I'd like to publish.
 ```
 
-Then connect — Claude opens a consent page where you pick an access level:
+Or install it yourself:
+
+| Where | Command |
+| --- | --- |
+| Any agent, with npm | `npx skills add KevyVo/webly-plugin --skill webly -g` |
+| Any agent, no npm | `curl -fsSL https://webly.ai/install.sh \| bash` |
+| Claude Code plugin | `/plugin marketplace add KevyVo/webly-plugin` then `/plugin install webly@webly` |
+
+The skill goes into `~/.claude/skills/webly` and `~/.agents/skills/webly`, so it's
+there in every folder and every new session. The Claude Code plugin also adds the
+Webly MCP server and a session-start hook. The helper needs Node 18+.
+
+## How it works
+
+1. **Publish without an account.** "Put this folder online." The agent runs the
+   bundled helper and gives you a `*.webly.site` link. The site is live and
+   editable for 24 hours and can be claimed for 7 days; unclaimed sites are
+   deleted.
+2. **Keep it.** "Keep my site" or "make me an account." The agent registers the
+   Webly MCP server and opens the sign-in page for you. You approve once, and the
+   site moves into your workspace, permanently.
+3. **Build on it.** Over MCP the agent gets drafts, a quality gate, publish only
+   when you say yes, rollback, a blog and CMS, forms, custom domains and analytics.
+
+Everything the agent needs to pick up later is saved on your computer
+(`~/.webly/`), so a new session, `/clear` or a restart carries on where you left
+off. The secret token that proves you own an unclaimed site never leaves that
+file except when the claim page opens in your browser.
+
+Already signed in? Ask your agent to "connect my Webly account".
+
+On the consent page you pick an access level:
 
 | Scope | Role | What the agent may do |
 | --- | --- | --- |
@@ -20,76 +55,44 @@ Then connect — Claude opens a consent page where you pick an access level:
 | `webly:edit` | `full_editor` | The above plus source files, deploys, publish / rollback / unpublish, CMS schema, domains |
 | `webly:admin` | `admin` | The above plus create/rename/delete websites, manage API keys, read the audit log |
 
-`tools/list` only returns the tools your granted role can call.
-
 No browser on this machine (server, container, CI)? Create a key at
-[app.webly.ai/dashboard/keys](https://app.webly.ai/dashboard/keys) and add a
-user-scope server instead:
+[app.webly.ai/dashboard/keys](https://app.webly.ai/dashboard/keys) and add it as a
+header on the MCP server; see [webly.ai/agent.md](https://webly.ai/agent.md),
+Phase 3b.
+
+## Updating
+
+The skill checks for a newer release and tells your agent. To update by hand:
 
 ```bash
-claude mcp add --scope user --transport http \
-  --header "Authorization: Bearer wb_your_key" \
-  webly-key https://api.webly.ai/v1/mcp
+npx skills update webly -g               # npx skills installs
+curl -fsSL https://webly.ai/install.sh | bash   # install.sh installs
+claude plugin update webly@webly         # the Claude Code plugin
 ```
-
-Restart Claude Code afterwards, and disable the plugin's `webly` server so the
-two don't both answer. The key is a secret — keep it out of version control.
-
-Not using the plugin marketplace? Install the skill and MCP server directly:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KevyVo/webly-plugin/main/install.sh | bash
-```
-
-## Try it without an account
-
-Ask "put this on Webly, I don't want to sign in yet". Claude deploys through a
-bundled helper (Node 18+) that saves a secret token to
-`~/.webly/anonymous-credential`. The site is public right away and editable
-for 24 hours. You can claim it into your account for 7 days. After that,
-unclaimed sites are deleted. Connect over OAuth later and Claude claims the site
-for you, or ask for the claim link and open it yourself. The link contains the
-secret, so don't share it.
-
-## What you can ask for
-
-- "Make me a coffee-shop site called Kuro Coffee" — Claude writes typed React
-  source, runs the gate, and sends a draft link.
-- "Add a blog post about our new espresso machine" — lands in a CMS collection
-  you can edit yourself in the dashboard.
-- "Publish it" / "roll that back" / "take it offline".
-- "Point kurocoffee.com at it" — Claude returns the exact DNS records; you
-  publish them, Claude verifies.
-- "Add a contact form" — submissions land in your dashboard, not a third party.
-
-Nothing goes public without an explicit yes from you. Drafts are `noindex,
-no-store`, every write is a new version, and publish/rollback are pointer moves,
-so nothing destroys history. Manage everything at
-[app.webly.ai/dashboard](https://app.webly.ai/dashboard) — including an Activity
-log of exactly what the agent did.
 
 ## Contents
 
 ```
-.claude-plugin/marketplace.json     marketplace manifest
-install.sh                          standalone skill + MCP installer
+.claude-plugin/marketplace.json   marketplace manifest
+install.sh                        installs skills/webly for Claude Code and Codex
+skills/webly/                     the skill, for npx skills and install.sh
 plugins/webly/
-  .claude-plugin/plugin.json        plugin manifest
-  .mcp.json                         Webly MCP server (https://api.webly.ai/v1/mcp)
-  skills/webly-connect/SKILL.md     connect, anonymous deploy + claim, working loop
-  skills/webly-connect/scripts/anonymous.mjs   no-account deploy helper
+  .claude-plugin/plugin.json      plugin manifest
+  .mcp.json                       Webly MCP server (https://api.webly.ai/v1/mcp)
+  hooks/hooks.json                session start: `webly.mjs doctor --brief`
+  skills/webly/                   the same skill
 ```
 
-`anonymous.mjs` is copied from `webly-mvp/scripts/anonymous.mjs`; re-copy it
-when that changes.
-
-The full tool and endpoint reference lives at
-[api.webly.ai/llms.txt](https://api.webly.ai/llms.txt).
+The skill and its helper are generated from the Webly repo
+(`skills/webly`, `scripts/webly.mjs`) by `scripts/sync-plugin.sh`. Edit them there,
+not here. The full API and MCP reference is at
+[api.webly.ai/docs](https://api.webly.ai/docs).
 
 ## Development
 
 ```bash
 claude plugin validate .
+claude plugin validate plugins/webly
 /plugin marketplace add ./path/to/webly-plugin   # test locally
 ```
 
