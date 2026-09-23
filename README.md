@@ -35,6 +35,22 @@ claude mcp add --scope user --transport http \
 Restart Claude Code afterwards, and disable the plugin's `webly` server so the
 two don't both answer. The key is a secret — keep it out of version control.
 
+Not using the plugin marketplace? Install the skill and MCP server directly:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KevyVo/webly-plugin/main/install.sh | bash
+```
+
+## Try it without an account
+
+Ask "put this on Webly, I don't want to sign in yet". Claude deploys through a
+bundled helper (Node 18+) that saves a secret token to
+`~/.webly/anonymous-credential`. The site is public right away and editable
+for 24 hours. You can claim it into your account for 7 days. After that,
+unclaimed sites are deleted. Connect over OAuth later and Claude claims the site
+for you, or ask for the claim link and open it yourself. The link contains the
+secret, so don't share it.
+
 ## What you can ask for
 
 - "Make me a coffee-shop site called Kuro Coffee" — Claude writes typed React
@@ -56,11 +72,16 @@ log of exactly what the agent did.
 
 ```
 .claude-plugin/marketplace.json     marketplace manifest
+install.sh                          standalone skill + MCP installer
 plugins/webly/
   .claude-plugin/plugin.json        plugin manifest
   .mcp.json                         Webly MCP server (https://api.webly.ai/v1/mcp)
-  skills/webly-connect/SKILL.md     connect + working loop
+  skills/webly-connect/SKILL.md     connect, anonymous deploy + claim, working loop
+  skills/webly-connect/scripts/anonymous.mjs   no-account deploy helper
 ```
+
+`anonymous.mjs` is copied from `webly-mvp/scripts/anonymous.mjs`; re-copy it
+when that changes.
 
 The full tool and endpoint reference lives at
 [api.webly.ai/llms.txt](https://api.webly.ai/llms.txt).

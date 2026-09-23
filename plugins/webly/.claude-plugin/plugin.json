@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "webly",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Build, preview and publish websites on Webly \u2014 typed React source, a quality gate, private drafts, and human-approved publishing",
   "author": {
     "name": "Webly",
