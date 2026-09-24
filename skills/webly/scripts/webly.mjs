@@ -12,14 +12,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 /** Skill release. scripts/sync-plugin.sh stamps this into the plugin manifests; bump it to ship. */
 export const VERSION = '0.5.0';
 // The published plugin manifest is what `npx skills`, install.sh and /plugin install all read from.
-const LATEST_URL = process.env.WEBLY_VERSION_URL ?? 'https://raw.githubusercontent.com/KevyVo/webly-plugin/main/plugins/webly/.claude-plugin/plugin.json';
+const LATEST_URL = process.env.WEBLY_VERSION_URL ?? 'https://raw.githubusercontent.com/Webly-AI/webly-plugin/main/plugins/webly/.claude-plugin/plugin.json';
 const CREDENTIAL_FILE = process.env.WEBLY_STATE_FILE || join(homedir(), '.webly', 'state.json');
 // Where releases before 0.4.0 saved the token; moved to CREDENTIAL_FILE on first read.
 const LEGACY_FILE = process.env.WEBLY_STATE_FILE ? null : join(homedir(), '.webly', 'anonymous-credential');
 const PENDING_FILE = join(dirname(CREDENTIAL_FILE), 'pending');
 // The last VERSION that ran here, so the first run after an update can say so.
 const SEEN_FILE = join(dirname(CREDENTIAL_FILE), 'version');
-const PLUGIN_MARKETPLACE = 'KevyVo/webly-plugin';
+const PLUGIN_MARKETPLACE = 'Webly-AI/webly-plugin';
 // The only server answers that mean the saved secret can never be used again.
 const SPENT = new Set(['credential_consumed', 'credential_expired']);
 // Mirrors the server's anonymous limits so a too-big folder fails before any request.
