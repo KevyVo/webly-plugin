@@ -4,7 +4,7 @@
 # does that when the person signs in to keep a site.
 set -euo pipefail
 
-REPO_BASE="https://raw.githubusercontent.com/KevyVo/webly-plugin/main/skills/webly"
+REPO_BASE="https://raw.githubusercontent.com/Webly-AI/webly-plugin/main/skills/webly"
 TARGETS=("${CLAUDE_CONFIG_DIR:-${HOME}/.claude}/skills/webly" "${HOME}/.agents/skills/webly")
 
 die() { echo "error: $1" >&2; exit 1; }

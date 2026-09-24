@@ -11,7 +11,7 @@ Paste this into Claude Code, Codex, Cursor or any agent that can run commands:
 
 ```
 Set up Webly, website hosting for agents.
-If I have npm: npx skills add KevyVo/webly-plugin --skill webly -g
+If I have npm: npx skills add Webly-AI/webly-plugin --skill webly -g
 If not: curl -fsSL https://webly.ai/install.sh | bash
 Then read https://api.webly.ai/docs and ask me what I'd like to publish.
 ```
@@ -20,9 +20,9 @@ Or install it yourself:
 
 | Where | Command |
 | --- | --- |
-| Any agent, with npm | `npx skills add KevyVo/webly-plugin --skill webly -g` |
+| Any agent, with npm | `npx skills add Webly-AI/webly-plugin --skill webly -g` |
 | Any agent, no npm | `curl -fsSL https://webly.ai/install.sh \| bash` |
-| Claude Code plugin | `/plugin marketplace add KevyVo/webly-plugin` then `/plugin install webly@webly` |
+| Claude Code plugin | `/plugin marketplace add Webly-AI/webly-plugin` then `/plugin install webly@webly` |
 
 The skill goes into `~/.claude/skills/webly` and `~/.agents/skills/webly`, so it's
 there in every folder and every new session. The Claude Code plugin also adds the
