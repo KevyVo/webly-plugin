@@ -52,17 +52,19 @@ on disk and at the API. Rebuild it before doing anything:
    - `mcp`: whether the Webly MCP server is configured for Claude Code
      (`via: plugin | user | project`) and Codex.
    - `pending`: a step an earlier session asked you to finish, e.g. `claim`.
+   - `updatedFrom`: set on the first run after this skill was updated. Tell
+     the person in one line which version they are now on.
    - `update`: set when a newer version of this skill is published. Run its
      `command` (it matches how this copy was installed), tell the person in one
      line, then carry on with the task using this copy. The new one loads next
      session.
 2. Check your own tool list for Webly MCP tools: `list_websites`, `whoami`,
-   `claim_anonymous_site` under a `webly` server (in Claude Code they are named
+   `create_claim_code` under a `webly` server (in Claude Code they are named
    `mcp__webly__…` or, from the plugin, `mcp__plugin_webly_webly__…`). A server
    that is configured but not in your tool list is **not loaded**.
    Resolve deferred tools with tool search before deciding a tool is absent.
    Loaded tools do not necessarily mean OAuth: API-key connections can manage
-   sites but do not expose `claim_anonymous_site`.
+   sites but do not expose `create_claim_code` (only a signed-in person can claim).
 3. Pick the row and follow it:
 
 | # | Token saved | Webly MCP tools loaded | Who this is | Do this |
@@ -70,16 +72,19 @@ on disk and at the API. Rebuild it before doing anything:
 | 1 | no | no | New to Webly | **Publish without an account** (below). Don't set up MCP until they want to keep the site. |
 | 2 | yes | no | Published before; MCP was never set up or didn't load | Read `site.next`. While it lists `update`, keep publishing with `webly deploy`. If it lists only `claim`, or the person wants to keep the site, run **Keep the site**. |
 | 3 | no | yes | Signed in | Use **Working over MCP**. Anything they deployed anonymously was already claimed. |
-| 4 | yes | yes | Connected with a site still unclaimed | If `claim_anonymous_site` is available, call it with the token (read it from `credentialFile`, never print it), then `webly forget` after success. Otherwise use **Keep the site**, step 3. Continue with **Working over MCP** after claiming. |
+| 4 | yes | yes | Connected with a site still unclaimed | Claim it: **Keep the site**, step 5. Never read `credentialFile` yourself. Continue with **Working over MCP** after claiming. |
 
 If the person asks to connect, sign in, or use their Webly account, they already
-have one: whatever the row, go to **Keep the site** and run steps 1, 2 and 4
-(skip 3 and 5 when no token is saved). Don't publish anonymously for them.
+have one: whatever the row, go to **Keep the site**. With a token saved, run it all.
+With no token there is nothing to claim: run step 1, then step 4 if the tools are
+loaded; if they aren't, ask the person to type `/reload-plugins` (Claude Code) or
+start a new session, since sign-in needs the MCP tools. Don't publish anonymously
+for them.
 
 If `pending` is `claim` and the claim tool is available, finish the claim now (row 4),
 without asking again: the person already asked for it before the restart. If
 `pending` is `claim` and the claim tool is unavailable, go to **Keep the
-site**, step 3.
+site**, step 2.
 
 ## Publish without an account
 
@@ -87,9 +92,24 @@ site**, step 3.
    Plain HTML, CSS and JS work best here. Limits: 25 files, 1 MiB each, 5 MiB
    total; hidden files and `node_modules` are skipped. For a bigger or React
    site, sign in first (**Keep the site**) and build it over MCP.
+   Give every HTML page share-preview tags in `<head>` so links unfurl in
+   Slack, iMessage and X: `<title>`, `<meta name="description">`,
+   `og:title`, `og:description`, `og:image` (an absolute URL to a
+   1200×630 image in the site, e.g. `/og.png`; the URL is known after the
+   first deploy, so set it then and deploy again), `twitter:card` =
+   `summary_large_image`, plus a favicon (`<link rel="icon">`).
 2. Run `webly deploy ./site` (a single `.html` file works too). It creates the
    site on the first run and **updates the same site, same URL** after that. It
-   waits for the build and prints the site JSON.
+   waits for the build and prints the site JSON. A project folder whose
+   `package.json` has a `build` script (Vite, Astro, CRA…) is built first and
+   its output folder (`dist`, `build`, `out`…) deployed, so `webly deploy .`
+   works. The site is named after `package.json`'s `name` or the project
+   folder; pass `--name "…"` to choose. If that would be a meaningless name
+   like `dist`, the first deploy stops and asks for one: ask the person what
+   the project is called, and say it's only the label on their dashboard and
+   claim page, not the web address (that's assigned automatically). Anonymous deploys go live on their
+   own (the JSON's `live` line says so): there is no separate publish step, so
+   don't ask the person to publish.
 3. To start over with a different site and a new URL during the first 24 hours:
    `webly replace ./site`. Only when the person asks for a new site; the old
    one goes offline.
@@ -140,30 +160,26 @@ own workspace.
    - Codex: `webly connect codex`.
    - Other hosts: follow https://webly.ai/agent.md, Phase 2.
    `connect` also records `pending: claim`, so the claim is finished by
-   whichever session loads the tools first. It prints the one step the person
-   has to do next.
-2. **Load the tools.** You can't run slash commands; ask the person to:
-   - Claude Code: type `/reload-plugins`. If Webly tools still don't appear,
-     exit and run `claude --continue`. That starts a fresh process, which loads
-     new MCP servers, and keeps this conversation.
-   - Codex: run `codex mcp login webly` yourself, in the foreground, and keep
-     it running until they click Allow (the callback port is random; if the
-     process exits first their approval is lost). Then they run
-     `codex resume --last`.
-   - Desktop apps: restart the app, then say "continue with Webly".
-3. **If the claim tool is unavailable in this session** (desktop app, `-p`,
-   the person can't restart now, or MCP uses an API key): claim in the browser
-   instead so nothing is lost. API keys cannot claim; do not retry a missing
-   tool or replace their working MCP configuration:
-   `webly claim-link --open`. It opens `app.webly.ai/claim` with the token in
-   the URL fragment (never sent to a server, never printed). Ask them to sign
-   in and click **Claim website**. Opening the page or signing in alone does
-   not claim the site. After they finish, run `webly doctor`: only
-   `siteError.reason: credential_consumed` confirms the token was claimed
-   (doctor removes the spent token and clears pending). If it is still
-   unclaimed, the browser was closed, or status is unavailable, keep the token
-   and pending step so they can retry. Never run `forget` merely because the
-   browser opened. MCP is ready the next time a session starts.
+   whichever session loads the tools first. Its `next` field says what to do.
+2. **Use MCP if it's already callable; otherwise claim in the browser now.**
+   Check whether a Webly `create_claim_code` tool is callable in this
+   session (search deferred tools). If yes, go to step 4. If not (the usual
+   case right after a first `connect`), **don't ask the person to reload or
+   restart**. Run `webly claim-link --open` straight away. It opens
+   `app.webly.ai/claim` with the token in the URL fragment (never sent to a
+   server, never printed). Ask them to sign in and click **Claim website**. If the
+   page shows the wrong Google account, **Not you? Use a different account**
+   switches it.
+   Opening the page or signing in alone does not claim the site. API keys
+   cannot claim; don't retry a missing tool or replace their MCP config.
+3. **Confirm the browser claim.** After they say they're done, run
+   `webly doctor`: only `siteError.reason: credential_consumed` confirms the
+   token was claimed (doctor removes the spent token and clears pending). If
+   it is still unclaimed, the browser was closed, or status is unavailable,
+   keep the token and pending step so they can retry. Never run `forget`
+   merely because the browser opened. MCP loads by itself next session
+   (Codex: `codex mcp login webly` first). Stop here; steps 4-5 are the MCP
+   path.
 4. **When the tools are loaded:**
    - Claude Code: call the server's `authenticate` tool
      (`mcp__plugin_webly_webly__authenticate` or `mcp__webly__authenticate`;
@@ -172,12 +188,15 @@ own workspace.
      `start` on Windows) and print it as a fallback. The callback completes by
      itself.
    - Other hosts: call `whoami`; the 401 starts the host's own sign-in.
-   - The consent page lets them pick an access level: `webly:content`,
-     `webly:edit` (default for building sites) or `webly:admin`.
-5. **Claim:** call `claim_anonymous_site` with the saved token, then
-   `webly forget` (deletes the token and the pending step). Tell them which
-   site moved and give the returned `dashboardUrl`. A retry by the same person
-   is safe (`alreadyClaimed: true`).
+   - The consent page offers `webly:content`, `webly:edit` and `webly:admin`
+     and defaults to `webly:admin`, which creating sites needs. Tell them to
+     keep it unless they only want you editing existing sites (`webly:edit`).
+5. **Claim:** call `create_claim_code`, then run `webly claim <code>`. The
+   helper sends the code and the saved token to Webly itself, so you never
+   read the token, and on success it deletes the token and the pending step.
+   Tell them which site moved and give the printed `dashboardUrl`. A retry by
+   the same person is safe (`alreadyClaimed: true`). The code lasts 10
+   minutes; get a new one if it expired (`claim_code_invalid`).
 
 After the claim: with billing off, or on a paid plan with a free slot, the site
 is permanent. On the Free plan with billing on it's *held*: editable until the
@@ -191,13 +210,18 @@ than creating a second one.
 
 1. Framework sites (typed React, the default): `acquire_edit_lease`, then
    `put_source_file` / `str_replace`. Static sites: `deploy_files`. Each write
-   makes a new draft version; the live site doesn't change.
+   makes a new draft version; the live site doesn't change. Writes are
+   Prettier-formatted, so copy `str_replace` text from `read_source_file`.
 2. `check_head` runs the quality gate (lint, typecheck, bundle, render). Fix
    every diagnostic.
 3. Show the person the draft URL (`https://draft--{subdomain}.webly.site`, not
    public, not indexed).
 4. `publish_website` only after they say yes to that exact site and version.
    `rollback_website` / `unpublish_website` if something is wrong live.
+
+New sites: `create_website` names the subdomain after the site; if that's taken
+it gets a suffix (`portfolio-x7k2p9`). Pass `subdomain` only when the person asks
+for a specific one (up to 56 characters); a taken one is a `409`, not a variant.
 
 Blog posts go through `add_blog_post`; repeating content (products, team, FAQs)
 goes in collections; forms post with `formAction('name')`, never `mailto:`.

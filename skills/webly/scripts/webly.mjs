@@ -5,18 +5,20 @@ import { realpathSync } from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { spawn, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, join, relative, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /** Skill release. scripts/sync-plugin.sh stamps this into the plugin manifests; bump it to ship. */
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 // The published plugin manifest is what `npx skills`, install.sh and /plugin install all read from.
 const LATEST_URL = process.env.WEBLY_VERSION_URL ?? 'https://raw.githubusercontent.com/KevyVo/webly-plugin/main/plugins/webly/.claude-plugin/plugin.json';
 const CREDENTIAL_FILE = process.env.WEBLY_STATE_FILE || join(homedir(), '.webly', 'state.json');
 // Where releases before 0.4.0 saved the token; moved to CREDENTIAL_FILE on first read.
 const LEGACY_FILE = process.env.WEBLY_STATE_FILE ? null : join(homedir(), '.webly', 'anonymous-credential');
 const PENDING_FILE = join(dirname(CREDENTIAL_FILE), 'pending');
+// The last VERSION that ran here, so the first run after an update can say so.
+const SEEN_FILE = join(dirname(CREDENTIAL_FILE), 'version');
 const PLUGIN_MARKETPLACE = 'KevyVo/webly-plugin';
 // The only server answers that mean the saved secret can never be used again.
 const SPENT = new Set(['credential_consumed', 'credential_expired']);
@@ -26,9 +28,11 @@ const TOKEN = /^wa_[A-Za-z0-9_-]{43}$/;
 
 const USAGE = `Usage: webly.mjs <command>
   doctor [--brief]            Saved site, MCP setup and pending step on this machine (never creates anything)
-  deploy <dir|file|payload.json>   Publish anonymously: creates the site, or updates it if this machine has one
-  replace <dir|file|payload.json>  Swap the site for a new one with a new URL (first 24 hours only)
+  deploy <dir|file|payload.json> [--name N]   Publish anonymously: creates the site, or updates it if this machine has one.
+                              A project with a package.json build script is built first and its output folder deployed.
+  replace <dir|file|payload.json> [--name N]  Swap the site for a new one with a new URL (first 24 hours only)
   status                      The saved site's status, URLs, deadlines and next step
+  claim <code>                Claim the saved site with a code from the create_claim_code MCP tool (the secret never leaves this helper)
   claim-link [--open]         Open (or print) the page that claims the site into an account
   connect claude|codex        Register the Webly MCP server for this agent host, at user scope
   pending set <intent> | clear   Remember a step to finish after a restart (e.g. claim)
@@ -88,10 +92,56 @@ export async function localCredential(api, file = CREDENTIAL_FILE) {
   return savedCredential(api, file);
 }
 
+// Folder names that say nothing about the site; the project around them names it instead.
+const GENERIC_DIRS = new Set(['dist', 'build', 'out', 'public', 'site', 'www', '_site', 'output']);
+// Names that would leave the person with a site called "dist" on their dashboard and claim page.
+export const isGenericName = (name) => GENERIC_DIRS.has(name.toLowerCase()) || ['index', 'src', 'app', 'web', 'website', 'html', 'tmp', 'temp', 'untitled', 'new folder'].includes(name.toLowerCase());
+const BUILD_OUTPUTS = ['dist', 'build', 'out', '_site', 'public'];
+
+/** A project folder with a build script is built, and its output folder is what gets deployed. Otherwise the target itself. */
+export async function buildIfProject(target, runner = run) {
+  const pkg = await readJson(join(target, 'package.json'));
+  if (!pkg?.scripts?.build) return target;
+  const pm = await stat(join(target, 'pnpm-lock.yaml')).then(() => 'pnpm', () => stat(join(target, 'yarn.lock')).then(() => 'yarn', () => 'npm'));
+  // Output folders only count if this build wrote them; an old dist/ or a source template must not be deployed.
+  const started = Date.now() - 2000; // slack for coarse filesystem timestamps
+  const steps = [];
+  if (!await stat(join(target, 'node_modules')).catch(() => null)) steps.push([pm, ['install']]);
+  steps.push([pm, ['run', 'build']]);
+  for (const [cmd, args] of steps) {
+    console.error(`Webly: running \`${cmd} ${args.join(' ')}\` in ${target}`);
+    const result = runner(cmd, args, target);
+    if (!result.ok) throw new Error(`\`${cmd} ${args.join(' ')}\` failed:\n${result.output.slice(-2000)}`);
+  }
+  const fresh = [];
+  for (const dir of BUILD_OUTPUTS) {
+    const info = await stat(join(target, dir, 'index.html')).catch(() => null);
+    if (info && info.mtimeMs >= started) fresh.push(join(target, dir));
+  }
+  if (fresh.length === 1) { console.error(`Webly: deploying the build output ${fresh[0]}`); return fresh[0]; }
+  if (fresh.length > 1) throw new Error(`The build wrote index.html to more than one folder (${fresh.join(', ')}). Run deploy on the output folder you mean.`);
+  throw new Error(`Built, but no index.html was written to ${BUILD_OUTPUTS.join('/, ')}/ by this build. Run deploy on the output folder.`);
+}
+
+/** The site name: --name, else package.json "name", else the folder, skipping generic ones like dist. */
+export async function siteName(target, isFile) {
+  if (isFile) return basename(target, extname(target));
+  let dir = resolve(target);
+  for (let i = 0; i < 2; i++, dir = dirname(dir)) {
+    const name = (await readJson(join(dir, 'package.json')))?.name?.replace(/^@[^/]+\//, '');
+    if (name) return name;
+    if (!GENERIC_DIRS.has(basename(dir))) return basename(dir);
+  }
+  return basename(resolve(target));
+}
+
 /** A folder, a single file, or a ready-made payload.json becomes an anonymous site body. */
-export async function payloadFrom(target) {
+export async function payloadFrom(target, name) {
   const info = await stat(target);
-  if (info.isFile() && extname(target) === '.json') return JSON.parse(await readFile(target, 'utf8'));
+  if (info.isFile() && extname(target) === '.json') {
+    const payload = JSON.parse(await readFile(target, 'utf8'));
+    return name === undefined ? payload : { ...payload, name };
+  }
   const found = [];
   if (info.isFile()) {
     found.push({ path: extname(target) === '.html' ? '/index.html' : `/${basename(target)}`, abs: target });
@@ -118,7 +168,7 @@ export async function payloadFrom(target) {
     const text = !bytes.includes(0) && isUtf8(bytes);
     files.push(text ? { path, content: bytes.toString('utf8') } : { path, content: bytes.toString('base64'), encoding: 'base64' });
   }
-  const name = info.isFile() ? basename(target, extname(target)) : basename(target === '.' ? process.cwd() : target);
+  name ??= await siteName(target, info.isFile());
   return { name: name.slice(0, 200) || 'Website', kind: 'static', files };
 }
 
@@ -160,6 +210,15 @@ export async function skillUpdate() {
   } catch { return null; }
 }
 
+/** The version this replaced if it is the first run since an update, else null. Records VERSION. Never fails. */
+export async function justUpdated(file = SEEN_FILE) {
+  const seen = (await readFile(file, 'utf8').catch(() => '')).trim();
+  if (seen === VERSION) return null;
+  await mkdir(dirname(file), { recursive: true, mode: 0o700 }).then(() => writeFile(file, VERSION + '\n')).catch(() => {});
+  // ponytail: installs from before 0.4.1 have no file yet, so their first update is recorded silently.
+  return seen && newer(VERSION, seen) ? seen : null;
+}
+
 async function api(base, path, token, { timeout = 30_000, ...init } = {}) {
   const response = await fetch(`${base}/public/v1/anonymous${path}`, {
     ...init, redirect: 'error', signal: AbortSignal.timeout(timeout), headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -192,8 +251,8 @@ async function openInBrowser(url) {
   });
 }
 
-function run(cmd, args) {
-  const result = spawnSync(cmd, args, { encoding: 'utf8', timeout: 120_000 });
+function run(cmd, args, cwd) {
+  const result = spawnSync(cmd, args, { encoding: 'utf8', timeout: 600_000, cwd, shell: process.platform === 'win32' });
   return { ok: result.status === 0, output: `${result.stdout ?? ''}${result.stderr ?? ''}`.trim(), missing: result.error?.code === 'ENOENT' };
 }
 
@@ -201,7 +260,10 @@ async function main() {
   const base = new URL(process.env.WEBLY_API_URL || 'https://api.webly.ai').origin;
   const url = new URL(base);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new Error('Use HTTPS (HTTP is allowed only for localhost)');
-  const [command, argument, extra] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const nameAt = argv.indexOf('--name');
+  const nameFlag = nameAt === -1 ? undefined : argv.splice(nameAt, 2)[1];
+  const [command, argument, extra] = argv;
   const print = (value) => console.log(typeof value === 'string' ? value : JSON.stringify(value, null, 2));
   const readPending = async () => (await readFile(PENDING_FILE, 'utf8').catch(() => '')).trim() || null;
 
@@ -215,7 +277,7 @@ async function main() {
     // The session-start hook allows 10 s; the update check runs alongside the status call.
     const brief = argument === '--brief';
     const updateCheck = skillUpdate();
-    const report = { version: VERSION, update: null, api: base, credentialFile: CREDENTIAL_FILE, credential: 'none', site: null, siteError: null, mcp: await mcpSetup(), pending: await readPending() };
+    const report = { version: VERSION, updatedFrom: await justUpdated(), update: null, api: base, credentialFile: CREDENTIAL_FILE, credential: 'none', site: null, siteError: null, mcp: await mcpSetup(), pending: await readPending() };
     let token = null;
     try { token = await savedCredential(base); } catch (error) { report.credential = `unusable: ${error.message}`; }
     if (token) {
@@ -238,11 +300,17 @@ async function main() {
     } else if (report.credential === 'present') parts.push(report.siteError?.status === 404 ? 'a token is saved but no site was deployed yet.' : 'an anonymous site is saved on this machine (status unavailable right now).');
     if (report.pending) parts.push(`Unfinished step from an earlier session: ${report.pending}.`);
     if (parts.length) print(`Webly: ${parts.join(' ')} Use the webly skill to continue.`);
-    if (report.update) print(`Webly skill ${report.update.latest} is available (installed ${VERSION}). Update: ${report.update.command}`);
+    // Hook output reaches the agent, not the person, so say what to pass on.
+    if (report.updatedFrom) print(`Webly skill was updated from ${report.updatedFrom} to ${VERSION}. Tell the user in one line.`);
+    if (report.update) print(`Webly skill ${report.update.latest} is available (installed ${VERSION}). Tell the user in one line and offer to run: ${report.update.command}`);
     return;
   }
 
   if (command === 'connect') {
+    // Tools registered mid-session aren't callable until a reload; don't block the claim on one.
+    const CLAIM_FALLBACK = (hasToken) => hasToken
+      ? 'If Webly tools are callable: call create_claim_code, then run `webly claim <code>` (never read the token yourself). If they are not, do not ask for a reload: run `webly claim-link --open` now so the person claims in the browser. MCP loads next session.'
+      : 'Webly tools load after /reload-plugins or in the next session.';
     const mcpUrl = `${base}/v1/mcp`;
     const setup = await mcpSetup();
     const hasToken = Boolean(await savedCredential(base).catch(() => null));
@@ -255,6 +323,8 @@ async function main() {
         if (official) {
           const market = run('claude', ['plugin', 'marketplace', 'add', PLUGIN_MARKETPLACE]);
           if (market.missing) throw new Error('The claude CLI is not on PATH. Run: claude mcp add --scope user --transport http webly ' + mcpUrl);
+          // `add` leaves an already-added marketplace at its old clone, which would install a stale plugin.
+          log.push(run('claude', ['plugin', 'marketplace', 'update', 'webly']).output);
           const install = run('claude', ['plugin', 'install', 'webly@webly', '--scope', 'user', '-y']);
           log.push(market.output, install.output);
           if (install.ok) {
@@ -269,12 +339,9 @@ async function main() {
           if (!add.ok && !/already exists/i.test(add.output)) throw new Error(`Could not register the MCP server:\n${log.filter(Boolean).join('\n')}`);
           via = 'user';
         }
-        return print({ connected: 'claude-code', via, mcpUrl, pending: hasToken ? 'claim' : null,
-          next: via === 'plugin'
-            ? 'Ask the person to type /reload-plugins. If Webly tools still do not appear, they exit and run `claude --continue` (keeps this conversation).'
-            : 'Ask the person to exit and run `claude --continue` (keeps this conversation); new MCP servers load when a session starts.' });
+        return print({ connected: 'claude-code', via, mcpUrl, pending: hasToken ? 'claim' : null, next: CLAIM_FALLBACK(hasToken) });
       }
-      return print({ connected: 'claude-code', via: setup.claudeCode.via, mcpUrl, pending: hasToken ? 'claim' : null, next: 'Already configured. If Webly tools are not loaded, ask the person to type /reload-plugins or run `claude --continue`.' });
+      return print({ connected: 'claude-code', via: setup.claudeCode.via, mcpUrl, pending: hasToken ? 'claim' : null, next: 'Already configured. If Webly tools are loaded, use them. ' + CLAIM_FALLBACK(hasToken) });
     }
     if (argument === 'codex') {
       if (!setup.codex.configured) {
@@ -299,6 +366,24 @@ async function main() {
     }
     await unlink(PENDING_FILE).catch(() => {});
     return print(token ? 'Saved token removed' : 'No saved token');
+  }
+
+  if (command === 'claim') {
+    const token = await savedCredential(base);
+    if (!token) throw new Error('No website deployed without an account is saved on this computer, so there is nothing to claim.');
+    if (!/^wc_[\w.-]+$/.test(argument ?? '')) throw new Error('Usage: webly.mjs claim <code>  (get the code from the create_claim_code MCP tool)');
+    const response = await fetch(`${base}/api/anonymous/claim`, {
+      method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000),
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, code: argument }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      if (SPENT.has(result.details?.reason)) { await forgetCredential(token); await unlink(PENDING_FILE).catch(() => {}); }
+      throw new Error(`${result.message || `Claim failed (${response.status})`}${result.details?.reason ? ` [${result.details.reason}]` : ''}`);
+    }
+    await forgetCredential(token);
+    await unlink(PENDING_FILE).catch(() => {});
+    return print({ claimed: true, alreadyClaimed: result.alreadyClaimed ?? false, name: result.website?.name, url: result.website?.urls?.published ?? null, claimHeld: result.website?.claimHeld, dashboardUrl: result.dashboardUrl, billingUrl: result.billingUrl });
   }
 
   if (!['init', 'deploy', 'replace', 'update', 'status', 'claim-link'].includes(command)) throw new Error(USAGE);
@@ -328,7 +413,8 @@ async function main() {
   }
 
   if (!argument) throw new Error(`${command} needs a folder, a file or a payload.json`);
-  const body = await payloadFrom(argument);
+  const target = await stat(argument).then(i => i.isDirectory(), () => false) ? await buildIfProject(argument) : argument;
+  const body = await payloadFrom(target, nameFlag);
   let response;
   const current = command === 'replace' ? null : await api(base, '/sites/current', token);
   if (current?.ok || command === 'update') {
@@ -337,6 +423,13 @@ async function main() {
     const { kind, ...rest } = body;
     response = await api(base, `/sites/${encodeURIComponent(current.body.id)}`, token, { method: 'PUT', body: JSON.stringify({ ...rest, expectedHeadVersion: current.body.headVersion }) });
   } else {
+    // Only creation takes the name; updates keep whatever the site is already called.
+    const named = typeof body.name === 'string' ? body.name.trim() : '';
+    if (!nameFlag && (!named || isGenericName(named))) {
+      throw new Error(`Not deployed: the site would be ${named ? `named "${named}", which says nothing about it` : 'unnamed'}. Ask the person what this project is called. ` +
+        'Make clear it is only the name shown in their Webly dashboard and on the claim page, not the web address: the URL is assigned automatically (https://anon-….webly.site). ' +
+        `Then rerun: webly ${command} ${argument} --name "<their answer>"`);
+    }
     response = await api(base, '/sites', token, { method: 'POST', body: JSON.stringify(command === 'replace' ? { ...body, replace: true } : body) });
   }
   if (!response.ok) await failed(response.body, `Request failed (${response.status})`);
